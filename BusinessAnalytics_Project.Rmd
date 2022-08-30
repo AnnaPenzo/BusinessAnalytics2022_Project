@@ -1,0 +1,227 @@
+---
+title: "Consumers and business analytics"
+author: "Mara Fantinel, Martina Ghedin, Andrea Lomurno, Anna Penzo"
+date: "January, 12th 2021"
+output:
+  pdf_document: default
+  html_notebook:
+    number_sections: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+# Analysis of Choice Based Conjoint survey data
+
+```{r}
+library(mlogit)
+library(lattice)
+library(vcd)
+library(cluster)
+library(dplyr)
+library(ggplot2)
+library(cluster)
+library(factoextra)
+
+
+```
+
+The first part of the code will allow us to import the dataset we build from the conjoint survey.
+We removed the last respondent observations because we had missing values. 
+
+```{r}
+movie <- read.csv("FinalCsvData.csv", sep=";")
+movie <- movie[1:2970,]
+head(movie)
+summary(movie)
+```
+In the chunk below we analyzed the effect of the attributes when isChosen = 1.
+The following attributes have been chosen because we expected them to be relevant in the analysis.
+```{r}
+xtabs(isChosen ~ First.viewing, data=movie)
+xtabs(isChosen ~ Genre, data=movie)
+xtabs(isChosen ~ Type, data=movie)
+xtabs(isChosen ~ Director, data=movie)
+``` 
+
+Now, we fit the model. Before building it, we need to organize the data with the function dfidx(), by default we keep it in the long format.
+
+```{r}
+movie.mlogit <- dfidx(movie, idx = list(c("ques", "resp.id"), "alt"))
+summary(movie.mlogit)
+``` 
+
+The resulting dataframe can be used to estimate a model with mlogit(). The multinomial logit model is the one we chose to conduct this analysis. 
+
+```{r}
+res1 <- mlogit(isChosen ~ Director + Type + Characters + Genre + Location + Temporal.collocation + Saga + Duration + First.viewing, data = movie.mlogit)
+summary(res1)
+``` 
+
+
+
+```{r}
+res2 <- mlogit(isChosen ~ Director + Type + Characters + Genre + Location + Temporal.collocation + Saga + Duration + First.viewing | -1 , data = movie.mlogit)
+summary(res2)
+
+lrtest(res2, res1)
+``` 
+
+We compare a second model without the intercept parameter. We then computed the likelihood ratio test that leads us to fail to reject the null hypothesis, so both models are equally good. The simplified model was selected, namely the one with less parameters.
+
+The most important attributes of the selected model are director, type, characters, location and first viewing. In order to assess if for some attributes preferences are strong polarized, to the point we obtained non significant estimates, we decided to compute the bootstrapped confidence interval.
+
+```{r}
+confint(res2, method="boot", boot.type="perc")
+``` 
+
+In the following chunks we implemented a code to return the sensitivity charts.
+
+```{r}
+att <- list(First.viewing=names(table(movie.mlogit$First.viewing)),
+               Type =names(table(movie.mlogit$Type)),
+               Characters =names(table(movie.mlogit$Characters)),
+               Director = names(table(movie.mlogit$Director)),
+               Genre = names(table(movie.mlogit$Genre)),
+               Temporal.collocation = names(table(movie.mlogit$Temporal.collocation)),
+               Saga = names(table(movie.mlogit$Saga)),
+               Duration = names(table(movie.mlogit$Duration)),
+               Location = names(table(movie.mlogit$Location)))
+
+```
+
+```{r}
+predict.mnl <- function(model, data) {
+  data.model <- model.matrix(update(model$formula, 0 ~ .), data = data)[,-1]
+  logitUtility <- data.model%*%model$coef 
+  share <- exp(logitUtility)/sum(exp(logitUtility))
+  cbind(share, data)
+}
+
+combinations <- expand.grid(att)
+choosen <- combinations[c(200, 500, 1357, 2900, 3001, 1997, 1424), ] 
+
+predict.mnl(res2, choosen)
+```
+
+```{r}
+sensitivity.mnl <- function(model, attrib, base.data, competitor.data) {
+  data <- rbind(base.data, competitor.data)
+  base.share <- predict.mnl(model, data)[1,1]
+  share <- NULL
+  for (a in seq_along(attrib)) {
+    for (i in attrib[[a]]) {
+      data[1,] <- base.data
+      data[1,a] <- i
+      share <- c(share, predict.mnl(model, data)[1,1])
+    }
+  }
+  data.frame(level=unlist(attrib), share=share, increase=share-base.share)
+}
+
+our <- choosen[1,] 
+competition <- choosen[-1,] 
+tradeoff <- sensitivity.mnl(res2, att, our, competition)
+tradeoff  
+library(ggplot2)
+ggplot(data=tradeoff, aes(x=increase, y=level)) +
+  geom_bar(stat="identity", fill="steelblue")+ xlab("Share's variation")+ 
+  ylab('')+theme_minimal()
+
+``` 
+To conclude, since we have information about gender and age, we tried to conduct a market segmentation.
+
+```{r}
+movie <- na.omit(movie)
+movie <- movie[movie$isChosen == 1,] 
+movie$female <- ifelse(movie$gender == 'F', 1, 0)
+movie$male <- ifelse(movie$gender == 'M', 1, 0)
+cluster_movie <- movie[, c("age", "female", "male")] 
+
+movie <- movie %>% slice(which(row_number() %% 15 == 1))
+cluster_movie <- cluster_movie %>% slice(which(row_number() %% 15 == 1)) 
+```
+
+```{r}
+min_clus <- 2
+max_clus <- 15
+eval_vector <- NULL
+
+for(clust_num in min_clus:max_clus) {
+  try_clustering <- pam(cluster_movie, k = clust_num, metric = "manhattan", stand = TRUE, pamonce=5)
+  eval_vector <- rbind(eval_vector, 
+                             data.frame(clust_num, 
+                                        average_silhouette_width = try_clustering$silinfo$avg.width))
+}
+
+eval_vector
+
+```
+
+From the table above, we choose k = 4 because it has the higher silhouette width's value. 
+ 
+```{r}
+plot(eval_vector$clust_num, eval_vector$average_silhouette_width)
+grid()
+abline(h=0.5, col="red")
+
+four_cluster_solution <- pam(cluster_movie, k = 4, metric = "manhattan", stand = TRUE, pamonce=5)
+movie$cluster <- four_cluster_solution$clustering 
+plot(four_cluster_solution)
+
+
+fviz_nbclust(cluster_movie, pam, method = 'silhouette')+theme_minimal()
+
+```
+ 
+The two plot above demonstrate how the third and fourth cluster can be eliminated, because they are too small and not well defined. 
+
+```{r}
+two_cluster_solution <- pam(cluster_movie, k = 2, metric = "manhattan", stand = TRUE, pamonce=5)
+
+fviz_cluster(two_cluster_solution, 
+             palette =c("#007892","#D9455F"),
+             ellipse.type ="euclid",
+             repel =TRUE,
+             ggtheme =theme_minimal())
+
+
+movie_reduced <- movie[movie$cluster<3,]
+movie_reduced$cluster <- factor(movie_reduced$cluster, labels=c("A", "B"))
+
+histogram(~age | cluster, data = movie_reduced, type = "density",  xlab = "Age of Respondend", layout = c(1,2))
+
+with(movie_reduced, table(cluster, gender)) 
+with(movie_reduced, table(cluster, age)) 
+
+```
+```{r}
+movie_reduced <- movie[movie$cluster<3,]
+movie_reduced$cluster <- factor(movie_reduced$cluster, labels=c("Male", "Female"))
+
+with(movie_reduced, table(cluster, First.viewing))
+mosaic( ~ First.viewing + cluster, data = movie_reduced,
+        labeling_args = list(set_varnames = c(First.viewing = "First viewing", cluster = "Segmentation")),
+        highlighting = "First.viewing", highlighting_fill = rainbow)
+
+```
+
+```{r}
+
+with(movie_reduced, table(cluster, Director))
+mosaic( ~ Director + cluster, data = movie_reduced,
+        labeling_args = list(set_varnames = c(Director = "Director", cluster = "Segmentation")),
+        highlighting = "Director", highlighting_fill = rainbow)
+
+```
+
+```{r}
+with(movie_reduced, table(cluster, Genre))
+mosaic( ~ Genre + cluster, data = movie_reduced,
+        labeling_args = list(set_varnames = c(Genre = "Genre", cluster = "Segmentation")),
+        highlighting = "Genre", highlighting_fill = rainbow)
+
+```
+
+There is no a relevant difference between the two groups.
+Male prefers thriller movies, Steven Spielberg as director and are inclined to watch movies on platforms. 
+
